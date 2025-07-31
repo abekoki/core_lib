@@ -165,16 +165,181 @@ def estimate_pose_simple(face_landmarks, image_size):
     # 距離を角度に変換（上向き=正、下向き=負）
     pitch = np.clip(distance_y * 0.5, -45, 45)  # ±45度に制限
     
-    # 信頼度の計算
-    # ランドマークの安定性と三角形の形状から計算
-    # 三角形の面積が大きいほど信頼度が高い
+    # 信頼度の計算（目のランドマークとその周辺の情報から）
+    # 1. 三角形の面積による基本信頼度
     triangle_area = abs((left_eye_px[0] * (right_eye_px[1] - nose_tip_px[1]) + 
                         right_eye_px[0] * (nose_tip_px[1] - left_eye_px[1]) + 
                         nose_tip_px[0] * (left_eye_px[1] - right_eye_px[1])) / 2)
     
     # 面積を正規化（顔の大きさに依存しないように）
     normalized_area = triangle_area / (eye_distance ** 2) if eye_distance > 0 else 0
-    confidence = min(normalized_area * 10, 1.0)  # 0-1の範囲に正規化
+    area_confidence = min(normalized_area * 10, 1.0)  # 0-1の範囲に正規化
+    
+    # 2. 目のランドマークの可視性チェック（遮蔽検出強化）
+    # 目の周辺の重要なランドマークを取得
+    eye_landmarks = [
+        33,   # 左目中心
+        263,  # 右目中心
+        159,  # 左上まぶた
+        145,  # 左下まぶた
+        386,  # 右上まぶた
+        374,  # 右下まぶた
+        133,  # 左目外角
+        362,  # 右目外角
+        157,  # 左目内角
+        158,  # 左目内角
+        387,  # 右目内角
+        388,  # 右目内角
+        160,  # 左目上部
+        161,  # 左目上部
+        163,  # 左目上部
+        246,  # 左目下部
+        247,  # 左目下部
+        249,  # 左目下部
+        373,  # 右目上部
+        374,  # 右目上部
+        375,  # 右目上部
+        380,  # 右目下部
+        381,  # 右目下部
+        382   # 右目下部
+    ]
+    
+    # 各ランドマークの可視性をチェック
+    eye_visibility_scores = []
+    z_coordinates = []
+    
+    for landmark_id in eye_landmarks:
+        landmark = face_landmarks.landmark[landmark_id]
+        
+        # z座標を記録（遮蔽検出用）
+        z_coordinates.append(landmark.z)
+        
+        # 基本的な可視性チェック
+        if landmark.z > 0 and 0 <= landmark.x <= 1 and 0 <= landmark.y <= 1:
+            eye_visibility_scores.append(1.0)
+        else:
+            eye_visibility_scores.append(0.0)
+    
+    # 基本的な可視性スコア
+    basic_visibility = sum(eye_visibility_scores) / len(eye_visibility_scores)
+    
+    # 遮蔽検出の強化
+    # 1. z座標の異常値検出（遮蔽時はz座標が異常な値になることが多い）
+    z_coordinates = np.array(z_coordinates)
+    z_mean = np.mean(z_coordinates)
+    z_std = np.std(z_coordinates)
+    
+    # z座標が異常に分散している場合は遮蔽の可能性
+    z_anomaly_score = 1.0 - min(1.0, z_std / 0.1)  # 標準偏差が0.1以上で異常
+    
+    # 2. 目の開瞼度による遮蔽検出
+    left_eye_opening, right_eye_opening, _ = calculate_eye_opening(face_landmarks, image_size)
+    
+    # 開瞼度が異常に低い場合は遮蔽の可能性
+    min_eye_opening = min(left_eye_opening, right_eye_opening)
+    eye_opening_score = max(0.0, min_eye_opening / 0.1)  # 0.1以下で遮蔽の可能性
+    
+    # 3. 左右の目の開瞼度の差が異常に大きい場合も遮蔽の可能性
+    eye_difference = abs(left_eye_opening - right_eye_opening)
+    eye_difference_score = max(0.0, 1.0 - eye_difference / 0.05)  # 差が0.05以上で異常
+    
+    # 総合的な可視性スコア（遮蔽検出強化版）
+    visibility_confidence = (
+        basic_visibility * 0.4 +
+        z_anomaly_score * 0.3 +
+        eye_opening_score * 0.2 +
+        eye_difference_score * 0.1
+    )
+    
+    # 遮蔽が検出された場合は大幅に信頼度を下げる
+    if basic_visibility < 0.5 or z_anomaly_score < 0.3 or eye_opening_score < 0.3:
+        visibility_confidence *= 0.2  # 遮蔽時は大幅に信頼度を下げる
+    
+    # 3. 目の形状の妥当性チェック
+    # 左右の目の開瞼度が極端に異なる場合は信頼度を下げる
+    left_eye_opening, right_eye_opening, _ = calculate_eye_opening(face_landmarks, image_size)
+    eye_symmetry = 1.0 - abs(left_eye_opening - right_eye_opening) / max(left_eye_opening + right_eye_opening, 0.001)
+    eye_symmetry = max(0.0, min(1.0, eye_symmetry))  # 0-1の範囲に制限
+    
+    # 4. 目の位置関係の妥当性チェック
+    # 両目の距離が極端に近い、または遠い場合は信頼度を下げる
+    eye_distance_ratio = eye_distance / image_size[1]  # 画像幅に対する比率
+    if 0.05 <= eye_distance_ratio <= 0.25:  # 適切な範囲
+        distance_confidence = 1.0
+    else:
+        # 範囲外の場合は距離に応じて信頼度を下げる
+        distance_confidence = max(0.0, 1.0 - abs(eye_distance_ratio - 0.15) / 0.15)
+    
+    # 5. 三角形の形状の妥当性チェック
+    # 三角形が極端に歪んでいる場合は信頼度を下げる
+    # 各辺の長さを計算
+    left_eye_to_right_eye = dist.euclidean(left_eye_px, right_eye_px)
+    left_eye_to_nose = dist.euclidean(left_eye_px, nose_tip_px)
+    right_eye_to_nose = dist.euclidean(right_eye_px, nose_tip_px)
+    
+    # 三角形の辺の長さの比率をチェック
+    sides = [left_eye_to_right_eye, left_eye_to_nose, right_eye_to_nose]
+    sides.sort()
+    if sides[2] > 0:  # 最長辺が0でない場合
+        triangle_ratio = sides[0] / sides[2]  # 最短辺と最長辺の比率
+        shape_confidence = max(0.0, triangle_ratio)  # 比率が1に近いほど良い
+    else:
+        shape_confidence = 0.0
+    
+    # 6. 総合信頼度の計算（改善された集約方法）
+    # 各信頼度要素の重み
+    confidence_weights = {
+        'area': 0.15,          # 三角形の面積
+        'visibility': 0.35,    # ランドマークの可視性（最重要）
+        'symmetry': 0.25,      # 目の対称性
+        'distance': 0.15,      # 目の距離の妥当性
+        'shape': 0.10          # 三角形の形状
+    }
+    
+    # 基本の重み付き平均
+    weighted_confidence = (
+        area_confidence * confidence_weights['area'] +
+        visibility_confidence * confidence_weights['visibility'] +
+        eye_symmetry * confidence_weights['symmetry'] +
+        distance_confidence * confidence_weights['distance'] +
+        shape_confidence * confidence_weights['shape']
+    )
+    
+    # 信頼度の補正と集約（遮蔽検出強化版）
+    # 1. 可視性が低い場合は全体の信頼度を大幅に下げる
+    if visibility_confidence < 0.5:
+        weighted_confidence *= visibility_confidence * 0.3  # より厳しく削減
+    
+    # 2. 遮蔽が強く検出された場合はさらに大幅に削減
+    if basic_visibility < 0.3 or z_anomaly_score < 0.2 or eye_opening_score < 0.2:
+        weighted_confidence *= 0.1  # 遮蔽時は90%削減
+    
+    # 2. 目の対称性が極端に悪い場合は信頼度を下げる
+    if eye_symmetry < 0.3:
+        weighted_confidence *= eye_symmetry * 0.7
+    
+    # 3. 三角形の形状が極端に歪んでいる場合は信頼度を下げる
+    if shape_confidence < 0.2:
+        weighted_confidence *= shape_confidence * 0.6
+    
+    # 4. 距離が不適切な場合は信頼度を下げる
+    if distance_confidence < 0.3:
+        weighted_confidence *= distance_confidence * 0.8
+    
+    # 5. 最終的な信頼度を計算（非線形補正）
+    # 低信頼度の場合はより厳しく、高信頼度の場合は緩やかに評価
+    if weighted_confidence < 0.3:
+        # 低信頼度の場合はさらに下げる
+        confidence = weighted_confidence * 0.8
+    elif weighted_confidence > 0.8:
+        # 高信頼度の場合は少し上げる
+        confidence = weighted_confidence * 1.1
+    else:
+        # 中程度の信頼度はそのまま
+        confidence = weighted_confidence
+    
+    # 信頼度を0-1の範囲に制限
+    confidence = max(0.0, min(1.0, confidence))
     
     return yaw, pitch, confidence, {
         'nose_tip': nose_tip_px,
@@ -189,7 +354,23 @@ def estimate_pose_simple(face_landmarks, image_size):
         'distance_x': distance_x,
         'distance_y': distance_y,
         'arrow_length': arrow_length,
-        'pitch_arrow_length': pitch_arrow_length
+        'pitch_arrow_length': pitch_arrow_length,
+        'triangle_area': triangle_area,
+        'eye_distance': eye_distance,
+        'confidence_details': {
+            'area_confidence': area_confidence,
+            'visibility_confidence': visibility_confidence,
+            'basic_visibility': basic_visibility,
+            'z_anomaly_score': z_anomaly_score,
+            'eye_opening_score': eye_opening_score,
+            'eye_difference_score': eye_difference_score,
+            'eye_symmetry': eye_symmetry,
+            'distance_confidence': distance_confidence,
+            'shape_confidence': shape_confidence,
+            'eye_distance_ratio': eye_distance_ratio,
+            'weighted_confidence': weighted_confidence,
+            'final_confidence': confidence
+        }
     }
 
 # 描画関数（顔の向きを矢印で表示）
@@ -239,52 +420,53 @@ def draw_pose_arrow(frame, yaw, pitch, confidence, landmarks_info):
         # 法線ベクトルを赤色で描画
         cv2.arrowedLine(frame, triangle_center, normal_end, (0, 0, 255), 2, tipLength=0.3)
 
-# メイン処理
-cap = cv2.VideoCapture(0)  # ウェブカメラ（動画の場合はファイルパス）
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
-    
-    # RGB変換
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
-    
-    # 検出結果の処理
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            # 開瞼度計算（瞼間距離と鼻の長さによる）
-            left_eye_opening, right_eye_opening, nose_length = calculate_eye_opening(face_landmarks, frame.shape[:2])
-            
-            # 簡易的な顔の向き推定
-            yaw, pitch, confidence, landmarks_info = estimate_pose_simple(face_landmarks, frame.shape[:2])
-            
-            # 結果表示
-            cv2.putText(frame, f"Left Eye Opening: {left_eye_opening:.3f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Right Eye Opening: {right_eye_opening:.3f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Nose Length: {nose_length:.1f}px", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Confidence: {confidence:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Yaw: {yaw:.1f}deg, Pitch: {pitch:.1f}deg", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Normal Vector: {landmarks_info['normal_vector']:.3f}", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Distance X: {landmarks_info.get('distance_x', 0):.1f}, Y: {landmarks_info.get('distance_y', 0):.1f}", (10, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # 色分けされたランドマーク描画
-            draw_landmarks_with_colors(frame, face_landmarks, frame.shape[:2])
-            
-            # 顔の向きを矢印で描画
-            draw_pose_arrow(frame, yaw, pitch, confidence, landmarks_info)
-            
-            # 色の説明を表示
-            cv2.putText(frame, "Green: Eye Opening", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, EAR_COLOR, 1)
-            cv2.putText(frame, "Blue: Pose", (10, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.5, POSE_COLOR, 1)
-            cv2.putText(frame, "Red: Confidence", (10, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.5, CONFIDENCE_COLOR, 1)
-            cv2.putText(frame, "Yellow: Triangle", (10, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.5, TRIANGLE_COLOR, 1)
-            cv2.putText(frame, "Blue Arrow: Yaw, Yellow Arrow: Pitch", (10, 320), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(frame, "Red Arrow: Normal Vector", (10, 340), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-    
-    cv2.imshow("Eye Detection", frame)
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+# メイン処理（モジュール化のため削除）
+if __name__ == "__main__":
+    cap = cv2.VideoCapture(0)  # ウェブカメラ（動画の場合はファイルパス）
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # RGB変換
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_frame)
+        
+        # 検出結果の処理
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                # 開瞼度計算（瞼間距離と鼻の長さによる）
+                left_eye_opening, right_eye_opening, nose_length = calculate_eye_opening(face_landmarks, frame.shape[:2])
+                
+                # 簡易的な顔の向き推定
+                yaw, pitch, confidence, landmarks_info = estimate_pose_simple(face_landmarks, frame.shape[:2])
+                
+                # 結果表示
+                cv2.putText(frame, f"Left Eye Opening: {left_eye_opening:.3f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Right Eye Opening: {right_eye_opening:.3f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Nose Length: {nose_length:.1f}px", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Confidence: {confidence:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Yaw: {yaw:.1f}deg, Pitch: {pitch:.1f}deg", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Normal Vector: {landmarks_info['normal_vector']:.3f}", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Distance X: {landmarks_info.get('distance_x', 0):.1f}, Y: {landmarks_info.get('distance_y', 0):.1f}", (10, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # 色分けされたランドマーク描画
+                draw_landmarks_with_colors(frame, face_landmarks, frame.shape[:2])
+                
+                # 顔の向きを矢印で描画
+                draw_pose_arrow(frame, yaw, pitch, confidence, landmarks_info)
+                
+                # 色の説明を表示
+                cv2.putText(frame, "Green: Eye Opening", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.5, EAR_COLOR, 1)
+                cv2.putText(frame, "Blue: Pose", (10, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.5, POSE_COLOR, 1)
+                cv2.putText(frame, "Red: Confidence", (10, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.5, CONFIDENCE_COLOR, 1)
+                cv2.putText(frame, "Yellow: Triangle", (10, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.5, TRIANGLE_COLOR, 1)
+                cv2.putText(frame, "Blue Arrow: Yaw, Yellow Arrow: Pitch", (10, 320), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                cv2.putText(frame, "Red Arrow: Normal Vector", (10, 340), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        cv2.imshow("Eye Detection", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
-cap.release()
-cv2.destroyAllWindows()
+    cap.release()
+    cv2.destroyAllWindows()
