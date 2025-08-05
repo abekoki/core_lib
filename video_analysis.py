@@ -18,7 +18,9 @@ from datetime import datetime
 from eye_detection import (
     face_mesh, 
     calculate_eye_opening, 
-    estimate_pose_simple
+    estimate_pose_simple,
+    draw_landmarks_with_colors,
+    draw_pose_arrow
 )
 
 # 設定ファイルをインポート
@@ -28,6 +30,46 @@ from config import (
     get_show_preview,
     get_progress_interval
 )
+
+def draw_debug_frame(frame, face_landmarks, landmarks_info, frame_count, confidence):
+    """
+    デバッグ用のフレームを描画（ランドマーク、三角形、矢印を含む）
+    """
+    debug_frame = frame.copy()
+    
+    # ランドマークを描画
+    draw_landmarks_with_colors(debug_frame, face_landmarks, frame.shape[:2])
+    
+    # 三角形を描画
+    if landmarks_info:
+        # 三角形の頂点を取得
+        left_eye = landmarks_info.get('left_eye', (0, 0))
+        right_eye = landmarks_info.get('right_eye', (0, 0))
+        nose_tip = landmarks_info.get('nose_tip', (0, 0))
+        
+        # 三角形を描画（黄色）
+        triangle_points = np.array([left_eye, right_eye, nose_tip], np.int32)
+        cv2.polylines(debug_frame, [triangle_points], True, (0, 255, 255), 2)
+        
+        # 三角形の重心を描画
+        triangle_center = landmarks_info.get('triangle_center', (0, 0))
+        cv2.circle(debug_frame, triangle_center, 5, (255, 0, 255), -1)
+        
+        # 顔の向きを矢印で描画
+        yaw = landmarks_info.get('distance_x', 0) * 0.5
+        pitch = landmarks_info.get('distance_y', 0) * 0.5
+        draw_pose_arrow(debug_frame, yaw, pitch, confidence, landmarks_info)
+    
+    # 情報テキストを描画
+    cv2.putText(debug_frame, f"Frame: {frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    cv2.putText(debug_frame, f"Confidence: {confidence:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    if landmarks_info:
+        yaw = landmarks_info.get('distance_x', 0) * 0.5
+        pitch = landmarks_info.get('distance_y', 0) * 0.5
+        cv2.putText(debug_frame, f"Yaw: {yaw:.1f}deg, Pitch: {pitch:.1f}deg", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    return debug_frame
 
 def analyze_video(video_path, output_csv_path, show_preview=False):
     """
@@ -53,17 +95,28 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
     
     print(f"動画情報: {total_frames}フレーム, {fps:.2f}fps, {width}x{height}")
     
+    # デバッグ動画の出力設定
+    debug_video_path = output_csv_path.replace('.csv', '_debug.mp4')
+    debug_video_writer = None
+    
     # CSVファイルを開く
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-        # CSVヘッダーを定義
+        # CSVヘッダーを定義（ランドマーク位置を追加）
         fieldnames = [
             'frame', 'leye_openness', 'reye_openness', 'confidence', 
             'face_yaw', 'face_pitch', 'nose_length', 'normal_vector',
             'distance_x', 'distance_y', 'arrow_length', 'pitch_arrow_length',
             'triangle_area', 'eye_distance', 'area_confidence', 'visibility_confidence',
-            'basic_visibility', 'z_anomaly_score', 'eye_opening_score', 'eye_difference_score',
+            'basic_visibility', 'z_anomaly_score', 'eye_position_score', 'eye_opening_score',
+            'eye_difference_score', 'eye_depth_score', 'eye_variation_score', 'eye_brightness_score',
             'eye_symmetry', 'distance_confidence', 'shape_confidence', 'eye_distance_ratio',
-            'weighted_confidence', 'final_confidence'
+            'weighted_confidence', 'final_confidence',
+            # ランドマーク位置を追加
+            'left_eye_x', 'left_eye_y', 'left_eye_z',
+            'right_eye_x', 'right_eye_y', 'right_eye_z',
+            'nose_tip_x', 'nose_tip_y', 'nose_tip_z',
+            'nose_bridge_x', 'nose_bridge_y', 'nose_bridge_z',
+            'triangle_center_x', 'triangle_center_y'
         ]
         
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -108,14 +161,24 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
                 'visibility_confidence': 0.0,
                 'basic_visibility': 0.0,
                 'z_anomaly_score': 0.0,
+                'eye_position_score': 0.0,
                 'eye_opening_score': 0.0,
                 'eye_difference_score': 0.0,
+                'eye_depth_score': 0.0,
+                'eye_variation_score': 0.0,
+                'eye_brightness_score': 0.0,
                 'eye_symmetry': 0.0,
                 'distance_confidence': 0.0,
                 'shape_confidence': 0.0,
                 'eye_distance_ratio': 0.0,
                 'weighted_confidence': 0.0,
-                'final_confidence': 0.0
+                'final_confidence': 0.0,
+                # ランドマーク位置のデフォルト値
+                'left_eye_x': 0.0, 'left_eye_y': 0.0, 'left_eye_z': 0.0,
+                'right_eye_x': 0.0, 'right_eye_y': 0.0, 'right_eye_z': 0.0,
+                'nose_tip_x': 0.0, 'nose_tip_y': 0.0, 'nose_tip_z': 0.0,
+                'nose_bridge_x': 0.0, 'nose_bridge_y': 0.0, 'nose_bridge_z': 0.0,
+                'triangle_center_x': 0.0, 'triangle_center_y': 0.0
             }
             
             # 検出結果の処理
@@ -127,7 +190,13 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
                 left_eye_opening, right_eye_opening, nose_length = calculate_eye_opening(face_landmarks, frame.shape[:2])
                 
                 # 顔の向き推定
-                yaw, pitch, confidence, landmarks_info = estimate_pose_simple(face_landmarks, frame.shape[:2])
+                yaw, pitch, confidence, landmarks_info = estimate_pose_simple(face_landmarks, frame.shape[:2], frame)
+                
+                # ランドマーク位置を取得
+                left_eye_landmark = face_landmarks.landmark[33]  # 左目
+                right_eye_landmark = face_landmarks.landmark[263]  # 右目
+                nose_tip_landmark = face_landmarks.landmark[1]  # 鼻先
+                nose_bridge_landmark = face_landmarks.landmark[168]  # 鼻根
                 
                 # データを更新
                 confidence_details = landmarks_info.get('confidence_details', {})
@@ -145,27 +214,57 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
                     'pitch_arrow_length': landmarks_info.get('pitch_arrow_length', 0.0),
                     'triangle_area': landmarks_info.get('triangle_area', 0.0),
                     'eye_distance': landmarks_info.get('eye_distance', 0.0),
-                                            'area_confidence': confidence_details.get('area_confidence', 0.0),
-                        'visibility_confidence': confidence_details.get('visibility_confidence', 0.0),
-                        'basic_visibility': confidence_details.get('basic_visibility', 0.0),
-                        'z_anomaly_score': confidence_details.get('z_anomaly_score', 0.0),
-                        'eye_opening_score': confidence_details.get('eye_opening_score', 0.0),
-                        'eye_difference_score': confidence_details.get('eye_difference_score', 0.0),
-                        'eye_symmetry': confidence_details.get('eye_symmetry', 0.0),
-                        'distance_confidence': confidence_details.get('distance_confidence', 0.0),
-                        'shape_confidence': confidence_details.get('shape_confidence', 0.0),
-                        'eye_distance_ratio': confidence_details.get('eye_distance_ratio', 0.0),
-                        'weighted_confidence': confidence_details.get('weighted_confidence', 0.0),
-                        'final_confidence': confidence_details.get('final_confidence', 0.0)
+                    'area_confidence': confidence_details.get('area_confidence', 0.0),
+                    'visibility_confidence': confidence_details.get('visibility_confidence', 0.0),
+                    'basic_visibility': confidence_details.get('basic_visibility', 0.0),
+                    'z_anomaly_score': confidence_details.get('z_anomaly_score', 0.0),
+                    'eye_position_score': confidence_details.get('eye_position_score', 0.0),
+                    'eye_opening_score': confidence_details.get('eye_opening_score', 0.0),
+                    'eye_difference_score': confidence_details.get('eye_difference_score', 0.0),
+                    'eye_depth_score': confidence_details.get('eye_depth_score', 0.0),
+                    'eye_variation_score': confidence_details.get('eye_variation_score', 0.0),
+                    'eye_brightness_score': confidence_details.get('eye_brightness_score', 0.0),
+                    'eye_symmetry': confidence_details.get('eye_symmetry', 0.0),
+                    'distance_confidence': confidence_details.get('distance_confidence', 0.0),
+                    'shape_confidence': confidence_details.get('shape_confidence', 0.0),
+                    'eye_distance_ratio': confidence_details.get('eye_distance_ratio', 0.0),
+                    'weighted_confidence': confidence_details.get('weighted_confidence', 0.0),
+                    'final_confidence': confidence_details.get('final_confidence', 0.0),
+                    # ランドマーク位置を追加
+                    'left_eye_x': left_eye_landmark.x, 'left_eye_y': left_eye_landmark.y, 'left_eye_z': left_eye_landmark.z,
+                    'right_eye_x': right_eye_landmark.x, 'right_eye_y': right_eye_landmark.y, 'right_eye_z': right_eye_landmark.z,
+                    'nose_tip_x': nose_tip_landmark.x, 'nose_tip_y': nose_tip_landmark.y, 'nose_tip_z': nose_tip_landmark.z,
+                    'nose_bridge_x': nose_bridge_landmark.x, 'nose_bridge_y': nose_bridge_landmark.y, 'nose_bridge_z': nose_bridge_landmark.z,
+                    'triangle_center_x': landmarks_info.get('triangle_center', (0, 0))[0],
+                    'triangle_center_y': landmarks_info.get('triangle_center', (0, 0))[1]
                 })
+                
+                # デバッグフレームを作成
+                debug_frame = draw_debug_frame(frame, face_landmarks, landmarks_info, frame_count, confidence)
+                
+                # デバッグ動画の初期化（最初のフレームで）
+                if debug_video_writer is None:
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    debug_video_writer = cv2.VideoWriter(debug_video_path, fourcc, fps, (width, height))
+                
+                # デバッグ動画にフレームを書き込み
+                if debug_video_writer is not None:
+                    debug_video_writer.write(debug_frame)
                 
                 # プレビュー表示
                 if show_preview:
-                    # 結果をフレームに描画
-                    cv2.putText(frame, f"Frame: {frame_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(frame, f"Yaw: {yaw:.1f}deg, Pitch: {pitch:.1f}deg", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(frame, f"Confidence: {confidence:.2f}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
+                    cv2.imshow("Video Analysis", debug_frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+            else:
+                # 顔が検出されない場合は元のフレームをデバッグ動画に書き込み
+                if debug_video_writer is not None:
+                    debug_frame = frame.copy()
+                    cv2.putText(debug_frame, f"Frame: {frame_count} - No Face Detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    debug_video_writer.write(debug_frame)
+                
+                # プレビュー表示
+                if show_preview:
                     cv2.imshow("Video Analysis", frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
@@ -175,10 +274,13 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
     
     # リソースを解放
     cap.release()
+    if debug_video_writer is not None:
+        debug_video_writer.release()
     if show_preview:
         cv2.destroyAllWindows()
     
     print(f"分析完了: {output_csv_path}")
+    print(f"デバッグ動画保存: {debug_video_path}")
     return True
 
 def main():

@@ -46,6 +46,25 @@ run_analysis.bat
 - `pitch_arrow_length`: Pitch矢印の長さ
 - `triangle_area`: 三角形の面積
 - `eye_distance`: 両目の距離
+- **信頼度詳細項目**:
+  - `area_confidence`: 面積による信頼度
+  - `visibility_confidence`: 可視性による信頼度
+  - `basic_visibility`: 基本的な可視性スコア
+  - `z_anomaly_score`: z座標異常値スコア
+  - `eye_position_score`: 目の位置関係スコア
+  - `eye_variation_score`: 目付近の色変化・輝度変化スコア
+  - `eye_symmetry`: 目の対称性
+  - `distance_confidence`: 距離による信頼度
+  - `shape_confidence`: 形状による信頼度
+  - `eye_distance_ratio`: 目の距離比率
+  - `weighted_confidence`: 重み付き平均信頼度
+  - `final_confidence`: 最終補正後の信頼度
+- **ランドマーク位置**:
+  - `left_eye_x/y/z`: 左目の座標
+  - `right_eye_x/y/z`: 右目の座標
+  - `nose_tip_x/y/z`: 鼻先の座標
+  - `nose_bridge_x/y/z`: 鼻根の座標
+  - `triangle_center_x/y`: 三角形の重心座標
 
 ## 技術仕様
 - **顔向き推定**: 三角形の重心と鼻先の距離から計算
@@ -91,8 +110,23 @@ PROGRESS_INTERVAL=30
 - **SHOW_PREVIEW**: 分析中のプレビュー表示の有無
 - **PROGRESS_INTERVAL**: 進捗表示の間隔（フレーム数）
 
+## 出力ファイル
+
+### CSVファイル
+- 分析結果は`analysis_results`ディレクトリ（または.envで指定したディレクトリ）に保存されます
+- ファイル名: `{動画名}_analysis.csv`
+
+### デバッグ動画
+- ランドマーク、三角形、顔向き矢印を描画したデバッグ動画が自動保存されます
+- ファイル名: `{動画名}_analysis_debug.mp4`
+- デバッグ動画には以下が表示されます：
+  - 顔のランドマーク（色分け）
+  - 三角形（黄色の線）
+  - 三角形の重心（マゼンタの点）
+  - 顔の向き矢印
+  - フレーム番号、信頼度、角度情報
+
 ## 注意事項
 - 動画ファイルは`mov_files.txt`に1行1ファイルで記載してください
-- 分析結果は`analysis_results`ディレクトリ（または.envで指定したディレクトリ）に保存されます
 - 顔が検出されないフレームは全て0.0で出力されます
 - `.env`ファイルが存在しない場合はデフォルト設定が使用されます
