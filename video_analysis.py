@@ -68,6 +68,24 @@ def draw_debug_frame(frame, face_landmarks, landmarks_info, frame_count, confide
         yaw = landmarks_info.get('distance_x', 0) * 0.5
         pitch = landmarks_info.get('distance_y', 0) * 0.5
         cv2.putText(debug_frame, f"Yaw: {yaw:.1f}deg, Pitch: {pitch:.1f}deg", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # サングラス検出結果を表示
+        sunglasses_detected = landmarks_info.get('sunglasses_detected', False)
+        sunglasses_text = "Sunglasses: Yes" if sunglasses_detected else "Sunglasses: No"
+        sunglasses_color = (0, 0, 255) if sunglasses_detected else (0, 255, 0)
+        cv2.putText(debug_frame, sunglasses_text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, sunglasses_color, 2)
+        
+        # 輝度値と閾値を表示
+        brightness = landmarks_info.get('brightness', 0)
+        threshold = landmarks_info.get('threshold', 50)
+        cv2.putText(debug_frame, f"Brightness: {brightness:.1f}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(debug_frame, f"Threshold: {threshold}", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # 設定値を表示
+        scale_factor = landmarks_info.get('scale_factor', 1.5)
+        target_size = landmarks_info.get('target_size', (50, 50))
+        cv2.putText(debug_frame, f"Scale Factor: {scale_factor}", (10, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(debug_frame, f"Target Size: {target_size[0]}x{target_size[1]}", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
     
     return debug_frame
 
@@ -101,17 +119,13 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
     
     # CSVファイルを開く
     with open(output_csv_path, 'w', newline='', encoding='utf-8') as csvfile:
-        # CSVヘッダーを定義（ランドマーク位置を追加）
+        # CSVヘッダーを定義（サングラス検出に特化）
         fieldnames = [
             'frame', 'leye_openness', 'reye_openness', 'confidence', 
             'face_yaw', 'face_pitch', 'nose_length', 'normal_vector',
-            'distance_x', 'distance_y', 'arrow_length', 'pitch_arrow_length',
-            'triangle_area', 'eye_distance', 'area_confidence', 'visibility_confidence',
-            'basic_visibility', 'z_anomaly_score', 'eye_position_score', 'eye_opening_score',
-            'eye_difference_score', 'eye_depth_score', 'eye_variation_score', 'eye_brightness_score',
-            'eye_symmetry', 'distance_confidence', 'shape_confidence', 'eye_distance_ratio',
-            'weighted_confidence', 'final_confidence',
-            # ランドマーク位置を追加
+            'distance_x', 'distance_y', 'triangle_area', 'eye_distance',
+            'sunglasses_detected', 'eye_roi_width', 'eye_roi_height',
+            # ランドマーク位置
             'left_eye_x', 'left_eye_y', 'left_eye_z',
             'right_eye_x', 'right_eye_y', 'right_eye_z',
             'nose_tip_x', 'nose_tip_y', 'nose_tip_z',
@@ -153,26 +167,11 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
                 'normal_vector': 0.0,
                 'distance_x': 0.0,
                 'distance_y': 0.0,
-                'arrow_length': 0.0,
-                'pitch_arrow_length': 0.0,
                 'triangle_area': 0.0,
                 'eye_distance': 0.0,
-                'area_confidence': 0.0,
-                'visibility_confidence': 0.0,
-                'basic_visibility': 0.0,
-                'z_anomaly_score': 0.0,
-                'eye_position_score': 0.0,
-                'eye_opening_score': 0.0,
-                'eye_difference_score': 0.0,
-                'eye_depth_score': 0.0,
-                'eye_variation_score': 0.0,
-                'eye_brightness_score': 0.0,
-                'eye_symmetry': 0.0,
-                'distance_confidence': 0.0,
-                'shape_confidence': 0.0,
-                'eye_distance_ratio': 0.0,
-                'weighted_confidence': 0.0,
-                'final_confidence': 0.0,
+                'sunglasses_detected': False,
+                'eye_roi_width': 0,
+                'eye_roi_height': 0,
                 # ランドマーク位置のデフォルト値
                 'left_eye_x': 0.0, 'left_eye_y': 0.0, 'left_eye_z': 0.0,
                 'right_eye_x': 0.0, 'right_eye_y': 0.0, 'right_eye_z': 0.0,
@@ -199,7 +198,6 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
                 nose_bridge_landmark = face_landmarks.landmark[168]  # 鼻根
                 
                 # データを更新
-                confidence_details = landmarks_info.get('confidence_details', {})
                 row_data.update({
                     'leye_openness': left_eye_opening,
                     'reye_openness': right_eye_opening,
@@ -210,26 +208,11 @@ def analyze_video(video_path, output_csv_path, show_preview=False):
                     'normal_vector': landmarks_info.get('normal_vector', 0.0),
                     'distance_x': landmarks_info.get('distance_x', 0.0),
                     'distance_y': landmarks_info.get('distance_y', 0.0),
-                    'arrow_length': landmarks_info.get('arrow_length', 0.0),
-                    'pitch_arrow_length': landmarks_info.get('pitch_arrow_length', 0.0),
                     'triangle_area': landmarks_info.get('triangle_area', 0.0),
                     'eye_distance': landmarks_info.get('eye_distance', 0.0),
-                    'area_confidence': confidence_details.get('area_confidence', 0.0),
-                    'visibility_confidence': confidence_details.get('visibility_confidence', 0.0),
-                    'basic_visibility': confidence_details.get('basic_visibility', 0.0),
-                    'z_anomaly_score': confidence_details.get('z_anomaly_score', 0.0),
-                    'eye_position_score': confidence_details.get('eye_position_score', 0.0),
-                    'eye_opening_score': confidence_details.get('eye_opening_score', 0.0),
-                    'eye_difference_score': confidence_details.get('eye_difference_score', 0.0),
-                    'eye_depth_score': confidence_details.get('eye_depth_score', 0.0),
-                    'eye_variation_score': confidence_details.get('eye_variation_score', 0.0),
-                    'eye_brightness_score': confidence_details.get('eye_brightness_score', 0.0),
-                    'eye_symmetry': confidence_details.get('eye_symmetry', 0.0),
-                    'distance_confidence': confidence_details.get('distance_confidence', 0.0),
-                    'shape_confidence': confidence_details.get('shape_confidence', 0.0),
-                    'eye_distance_ratio': confidence_details.get('eye_distance_ratio', 0.0),
-                    'weighted_confidence': confidence_details.get('weighted_confidence', 0.0),
-                    'final_confidence': confidence_details.get('final_confidence', 0.0),
+                    'sunglasses_detected': landmarks_info.get('sunglasses_detected', False),
+                    'eye_roi_width': landmarks_info.get('eye_roi', None).shape[1] if landmarks_info.get('eye_roi') is not None else 0,
+                    'eye_roi_height': landmarks_info.get('eye_roi', None).shape[0] if landmarks_info.get('eye_roi') is not None else 0,
                     # ランドマーク位置を追加
                     'left_eye_x': left_eye_landmark.x, 'left_eye_y': left_eye_landmark.y, 'left_eye_z': left_eye_landmark.z,
                     'right_eye_x': right_eye_landmark.x, 'right_eye_y': right_eye_landmark.y, 'right_eye_z': right_eye_landmark.z,
